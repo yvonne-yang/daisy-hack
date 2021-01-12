@@ -22,11 +22,33 @@ class RandomPlayer(SiteLocationPlayer):
             stores.append(store)
         self.stores_to_place = stores
 
+class NothingPlayer(SiteLocationPlayer):
+    def place_stores(self, slmap: SiteLocationMap, 
+                     store_locations: Dict[int, List[Store]],
+                     current_funds: float):
+        self.stores_to_place = []
+        pass
+        return
 
 class MaxDensityPlayer(SiteLocationPlayer):
+
+    def moving_density_calculator(self, slmap: SiteLocationMap,
+    store_locations: Dict[int, List[Store]], current_funds: float, SM_GRID=(60,60)):
+        '''
+            Move in 60x60 grid and find element-wise sum of every 60x60 possible
+        '''
+        noise = slmap.population_distribution
+        area = np.zeros(shape=(slmap.size[0] - SM_GRID[0], slmap.size[1] - SM_GRID[1])) ## all the area values we will store
+        for i in range(slmap.size[0] - SM_GRID[0]):
+            for j in range(slmap.size[1] - SM_GRID[1]):
+                area[i, j] = np.sum(noise[i:i+SM_GRID[0], j:j+SM_GRID[1]]) ## element-wise
+
+        return area
+    
     """ 
     Player always selects the highest density location at least 50 units
     away from the nearest store. 
+
 
     Store type will always be the largest one it can afford.
     """
@@ -35,7 +57,7 @@ class MaxDensityPlayer(SiteLocationPlayer):
                      current_funds: float):
         store_conf = self.config['store_config']
         # Configurable minimum distance away to place store
-        min_dist = 50
+        min_dist = 100
         # Check if it can buy any store at all
         if current_funds < store_conf['small']['capital_cost']:
             self.stores_to_place = []
@@ -47,22 +69,24 @@ class MaxDensityPlayer(SiteLocationPlayer):
             store_type = 'medium'
         else:
             store_type = 'small'
-        # Find highest population location
+        # Find highest population location that's at least 100m away from your location. Else, do nothing.
         all_stores_pos = []
-        for player, player_stores in store_locations.items():
-            for player_store in player_stores:
+        for player_store in store_locations[self.player_id]:
                 all_stores_pos.append(player_store.pos)
         
-        sorted_indices = tuple(map(tuple, np.dstack(np.unravel_index(np.argsort(slmap.population_distribution.ravel()), slmap.size))[0][::-1]))
-        for max_pos in sorted_indices:
+        SM_GRID = (110,110)
+        area = self.moving_density_calculator(slmap, store_locations, current_funds, SM_GRID)
+        area_indices = tuple(map(tuple, np.dstack(np.unravel_index(np.argsort(area.ravel()), area.shape))[0][::-1]))
+        for max_pos in area_indices:
             too_close = False
+            actual_pos = (max_pos[0] + SM_GRID[0]/2 - 1, max_pos[1] + SM_GRID[1]/2 - 1)
             for pos in all_stores_pos:
-                dist = np.sqrt(np.square(max_pos[0]-pos[0]) + np.square(max_pos[1]-pos[1]))
+                dist = np.sqrt(np.square(actual_pos[0]-pos[0]) + np.square(actual_pos[1]-pos[1]))
                 if dist < min_dist:
                     too_close = True
             if not too_close:
-                self.stores_to_place = [Store(max_pos, store_type)]
-
+                self.stores_to_place = [Store(actual_pos, store_type)]
+                return
 
 class CopycatPlayer(SiteLocationPlayer):
     """ 
@@ -98,7 +122,7 @@ class AllocSamplePlayer(SiteLocationPlayer):
                      store_locations: Dict[int, List[Store]],
                      current_funds: float):
         store_conf = self.config['store_config']
-        num_rand = 100
+        num_rand = 150
 
         sample_pos = []
         for i in range(num_rand):

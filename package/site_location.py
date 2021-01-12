@@ -16,12 +16,14 @@ import importlib
 import signal
 import time
 
+from matplotlib import pyplot as plt
 from copy import copy, deepcopy
 from enum import Enum
 
 from perlin_numpy import generate_perlin_noise_2d
 
 from typing import List, Dict, Optional, Tuple
+from rl_solution import SmartAgent
 
 
 
@@ -185,7 +187,7 @@ DEFAULT_CONFIGURATION = {
     "profit_per_customer": 0.5,
     "max_stores_per_round": 2,
     "place_stores_time_s": 10,
-    "ignore_player_exceptions": True,
+    "ignore_player_exceptions": False,
     "store_config": {
         "small": {
             "capital_cost": 10000.0,
@@ -229,6 +231,8 @@ def euclidian_distances(size, point):
     distances = np.sqrt(np.square(x[:, None] - point[0]) + np.square(y[None, :] - point[1]))
     return distances
 
+
+# def calculate_earnings_over_time(slmap: SiteLocationMap, 
 
 def closest_store_allocation(slmap: SiteLocationMap,
                              players: Dict[int, SiteLocationPlayer],
@@ -361,17 +365,30 @@ class SiteLocationGame:
 
         self.current_round = 0
 
-    def play(self):
+    def play(self, agent, training_index, game_number):
         """Plays a full site location game, returns the winning 
         SiteLocationPlayer object.
         """
         log.info("Starting game")
-        for i in range(self.config["n_rounds"]):
-            self.play_round()
-        log.info(f"Winner: {self.winner().name}")
-        return self.winner()
+        agent.agent_start(0) ## First round, you on round 0 and you ain't rich
+        for i in range(0, self.config["n_rounds"]):
+            self.play_round(agent, training_index)
+            # richestIndex = self.scores.index(max(self.scores))
+            # isRichest = 0 if richestIndex != training_index else 1
                        
-    def play_round(self):
+        agent.agent_end(1)
+        winner = self.winner()
+        log.info(f"Winner: {self.winner().name}")
+        if winner.player_id != training_index:
+            agent.agent_end(-1)
+            return 0 ## loss
+        else:
+            return 1 ## win
+        
+        
+        
+                       
+    def play_round(self, agent, training_index):
         """Plays a single round of the site location game
         """
         self.current_round += 1
@@ -385,8 +402,9 @@ class SiteLocationGame:
             prev_score = self.scores[-1][player_id]
             player.stores_to_place = []
             try:
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(self.config["place_stores_time_s"])
+                # signal.signal(signal.SIGALRM, timeout_handler)
+                # signal.alarm(self.config["place_stores_time_s"])
+                pass
             except AttributeError:
                 # We're on windows, so we can't use SIGALRM to limit execution 
                 # time
@@ -394,10 +412,16 @@ class SiteLocationGame:
             start_time = time.time()
             if self.config["ignore_player_exceptions"]:
                 try:
-                    player.place_stores(deepcopy(self.slmaps[-1]), 
-                                        self.store_locations[-2], 
-                                        prev_score)
-                    signal.alarm(0) # clear current alarm
+                    if training_index == player_id:
+                        player.place_stores(deepcopy(self.slmaps[-1]), 
+                                            self.store_locations[-2], 
+                                            prev_score, agent)
+                    else:
+                        player.place_stores(deepcopy(self.slmaps[-1]), 
+                                            self.store_locations[-2], 
+                                            prev_score)
+                    # signal.alarm(0) # clear current alarm
+
                 except PlayerTimedOutError:
                     log.warn(f"Player {player.name} timed out placing stores")
                     self.timeouts += 1
@@ -406,10 +430,15 @@ class SiteLocationGame:
                     log.warn(f"Player {player.name} raised exception in place_stores")
                     new_stores = []
             else:
-                player.place_stores(deepcopy(self.slmaps[-1]), 
-                                    self.store_locations[-2], 
-                                    prev_score)
-                signal.alarm(0) # clear current alarm
+                if training_index == player_id:
+                    player.place_stores(deepcopy(self.slmaps[-1]), 
+                                        self.store_locations[-2], 
+                                        prev_score, agent)
+                else:
+                    player.place_stores(deepcopy(self.slmaps[-1]), 
+                                        self.store_locations[-2], 
+                                        prev_score)
+                # signal.alarm(0) # clear current alarm
 
             elapsed = time.time() - start_time
             if elapsed > self.config["place_stores_time_s"]:
@@ -463,7 +492,7 @@ class SiteLocationGame:
                 msg = f"Player attempted to place invalid store type"
                 log.warn(msg)
                 raise RuntimeError(msg)
-            elif store.pos[0] > self.config["map_size"][0] | store.pos[1] > self.config["map_size"][1]:
+            elif store.pos[0] > self.config["map_size"][0] or store.pos[1] > self.config["map_size"][1]:
                 self.out_of_bounds_error = True
                 msg = f"Player attempted to place store out of bounds"
                 log.warn(msg)
@@ -608,6 +637,11 @@ def main():
                         help="pass a series of <module>:<class> strings to specify the players in the game")
     parser.add_argument("--report",  type=str, default="game",
                         help="report game results to the given dir")
+    parser.add_argument("--track",  type=int, default=0,
+                        help="Player to train")
+    parser.add_argument("--episodes",  type=int, default=100,
+                        help="The duration to train")
+    parser.add_argument("--plotFreq", type=int, default=10, help="Produce a plot every n games")
     args = parser.parse_args()
 
     if args.players is None:
@@ -618,11 +652,42 @@ def main():
     for player_str in args.players:
         players.append(import_player(player_str))
 
-    game = SiteLocationGame(DEFAULT_CONFIGURATION,
-                            players,
-                            attractiveness_allocation)
-    game.play()
-    game.save_game_report(args.report)
+    '''
+        Declare the agent
+    '''
+    q_values = np.array([[0,10,0,0,0], [10,0,0,7,0], [2,0,0,10,10], [4,0,0,10,7], [5,0,0,10,7], [9,11,7,7,7], [11,9,8,5,5], [9,11,9,4,4], [11,9,10,2,2], [0,3,11,9,8]])
+    agent_info = {"epsilon" : 0.001, "num_rounds" : DEFAULT_CONFIGURATION["n_rounds"],
+    "discount" : 1, "q_values" : q_values, "default_conf" : DEFAULT_CONFIGURATION}
+    agent = SmartAgent()
+    agent.agent_init(agent_info)
+
+    win_percentages = []  ## plot this
+    total_wins = 0
+    for i in range(args.episodes):
+        print("GAME %d" % i)
+        game = SiteLocationGame(DEFAULT_CONFIGURATION,
+                        players,
+                        attractiveness_allocation)
+    
+        win = game.play(agent, args.track, i)
+        if win == 1:
+            total_wins += 1
+            win_percentages.append(total_wins/(i+1))
+        else:
+            win_percentages.append(total_wins/(i+1))
+        game.save_game_report(os.path.join(args.report, str(i)))
+        print(agent.q)
+        agent.agent_reset()
+    npy.save("Q.npy", agent.q) ## Save optimal q-value
+    print(agent.q)
+    plt.figure(figsize=(9,3))
+    plt.plot(win_percentages)
+    plt.title("How well is our model learning?")
+    plt.xlabel("Iteration Number")
+    plt.ylabel("Win Percentage")
+    plt.show()
+    plt.savefig('win_percentage.png', bbox_inches='tight')
+    # game.save_game_report(args.report)
 
 if __name__ == "__main__":
     main()
